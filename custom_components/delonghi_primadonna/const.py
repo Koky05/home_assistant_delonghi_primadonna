@@ -23,12 +23,14 @@ DEFAULT_IMAGE_URL = (
 BEVERAGE_SERVICE_NAME = 'make_beverage'
 
 # Mapping of profile id to profile name
-AVAILABLE_PROFILES = {
+DEFAULT_PROFILES = {
     1: 'Profile 1',
     2: 'Profile 2',
     3: 'Profile 3',
     4: 'Guest',
 }
+
+AVAILABLE_PROFILES = dict(DEFAULT_PROFILES)
 
 POWER_OFF_OPTIONS = {
     '15min': 0,

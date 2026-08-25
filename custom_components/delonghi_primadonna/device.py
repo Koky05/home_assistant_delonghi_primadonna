@@ -31,12 +31,13 @@ from .const import (AMERICANO_OFF, AMERICANO_ON, AVAILABLE_PROFILES,
                     COFFEE_GROUNDS_CONTAINER_DETACHED,
                     COFFEE_GROUNDS_CONTAINER_FULL, CONTROLL_CHARACTERISTIC,
                     DEBUG, DEFAULT_DEVICE_NAME, DEFAULT_IMAGE_URL,
-                    DEVICE_READY, DEVICE_STATUS, DEVICE_TURNOFF, DOMAIN,
-                    DOPPIO_OFF, DOPPIO_ON, ESPRESSO2_OFF, ESPRESSO2_ON,
-                    ESPRESSO_OFF, ESPRESSO_ON, HOTWATER_OFF, HOTWATER_ON,
-                    LONG_OFF, LONG_ON, MACHINE_STATUS, NAME_CHARACTERISTIC,
-                    NOZZLE_STATE, START_COFFEE, STEAM_OFF, STEAM_ON,
-                    WATER_SHORTAGE, WATER_TANK_DETACHED)
+                    DEFAULT_PROFILES, DEVICE_READY, DEVICE_STATUS,
+                    DEVICE_TURNOFF, DOMAIN, DOPPIO_OFF, DOPPIO_ON,
+                    ESPRESSO2_OFF, ESPRESSO2_ON, ESPRESSO_OFF, ESPRESSO_ON,
+                    HOTWATER_OFF, HOTWATER_ON, LONG_OFF, LONG_ON,
+                    MACHINE_STATUS, NAME_CHARACTERISTIC, NOZZLE_STATE,
+                    START_COFFEE, STEAM_OFF, STEAM_ON, WATER_SHORTAGE,
+                    WATER_TANK_DETACHED)
 from .machine_switch import MachineSwitch, parse_switches
 from .model import get_machine_model
 
@@ -310,14 +311,22 @@ class DelongiPrimadonna:
         self._n_profiles = (
             machine.nProfiles
             if machine and machine.nProfiles
-            else len(AVAILABLE_PROFILES)
+            else len(DEFAULT_PROFILES)
         )
+        # Per-device defaults so each instance keeps its own profile
+        # mapping even when multiple machines are configured.
+        self._default_profiles: dict[int, str] = {
+            pid: DEFAULT_PROFILES.get(pid, f"Profile {pid}")
+            for pid in range(1, self._n_profiles + 1)
+        }
+        # Start from clean defaults so stale / corrupt values from a
+        # previous session cannot leak into a fresh load.
+        AVAILABLE_PROFILES.clear()
+        AVAILABLE_PROFILES.update(self._default_profiles)
         self.active_profile_id: int | None = None
-        for pid in range(1, self._n_profiles + 1):
-            AVAILABLE_PROFILES.setdefault(pid, f"Profile {pid}")
-        for pid in list(AVAILABLE_PROFILES):
-            if pid > self._n_profiles:
-                AVAILABLE_PROFILES.pop(pid)
+        self._profile_ids: dict[str, int] = {
+            name: pid for pid, name in AVAILABLE_PROFILES.items()
+        }
         self.profiles = list(AVAILABLE_PROFILES.values())
         self._profiles_loaded = False
 
@@ -524,15 +533,23 @@ class DelongiPrimadonna:
             if monitor_data:
                 self._handle_monitor_data(monitor_data, answer_id, value)
         elif answer_id == 0xA4:
-            parsed = []
+            parsed = {}
             try:
                 parsed = self._parse_profile_response(
                     list(value)
                 )
             except Exception as err:  # noqa: BLE001
                 _LOGGER.warning("Failed to parse profile response: %s", err)
-            for pid, name in parsed.items():
-                AVAILABLE_PROFILES[pid] = name
+            if parsed:
+                AVAILABLE_PROFILES.update(parsed)
+            else:
+                # Reset to per-device defaults when parsing returned
+                # nothing useful (corrupt data or decode failure).
+                AVAILABLE_PROFILES.clear()
+                AVAILABLE_PROFILES.update(self._default_profiles)
+            self._profile_ids = {
+                name: pid for pid, name in AVAILABLE_PROFILES.items()
+            }
             _LOGGER.debug(
                 "Available profiles: %s",
                 AVAILABLE_PROFILES
@@ -598,11 +615,46 @@ class DelongiPrimadonna:
         if answer_id == 0x75:
             self.active_switches = parse_switches(raw_packet)
 
+    @staticmethod
+    def _is_valid_profile_name(name: str) -> bool:
+        """Return True if *name* looks like a real profile name.
+
+        Profile names on DeLonghi machines use Latin characters only
+        (ASCII, accented letters for European languages).  Misaligned
+        UTF-16-BE decoding produces printable CJK or other non-Latin
+        characters — this check rejects those.
+        """
+        if not name:
+            return False
+        for ch in name:
+            # Reject null bytes and control characters
+            if ch == "\x00" or (ord(ch) < 0x20 and ch not in "\t\n\r"):
+                return False
+            cp = ord(ch)
+            # Reject CJK Unified Ideographs (U+4E00..U+9FFF)
+            if 0x4E00 <= cp <= 0x9FFF:
+                return False
+            # Reject Hangul Syllables (U+AC00..U+D7AF)
+            if 0xAC00 <= cp <= 0xD7AF:
+                return False
+            # Reject Katakana (U+30A0..U+30FF) — common in misaligned decode
+            if 0x30A0 <= cp <= 0x30FF:
+                return False
+            # Reject Hiragana (U+3040..U+309F)
+            if 0x3040 <= cp <= 0x309F:
+                return False
+        return True
+
     def _parse_profile_response(
         self,
         data: list[int],
     ) -> dict[int, str]:
-        """Parse profile names sent by the machine."""
+        """Parse profile names sent by the machine.
+
+        Returns a ``{id: name}`` dict.  When the decoded names look
+        corrupt (null bytes, unprintable characters) an empty dict is
+        returned so the caller keeps the hardcoded defaults.
+        """
 
         b = bytes(data)
         if len(b) < 4 or b[0] != 0xD0:
@@ -615,15 +667,28 @@ class DelongiPrimadonna:
         profile_index = 1
         idx = NAME_HEADER
         while idx + NAME_SIZE < len(b):
-            profiles.setdefault(
-                profile_index,
-                b[idx:idx + NAME_SIZE]
-                .decode("utf-16-be")
-                .rstrip("\x00")
-                .strip(),
-            )
+            raw = b[idx:idx + NAME_SIZE]
+            try:
+                name = raw.decode("utf-16-be").rstrip("\x00").strip()
+            except UnicodeDecodeError:
+                _LOGGER.debug(
+                    "Profile name decode failed for bytes %s",
+                    hexlify(raw, " "),
+                )
+                return {}
+            profiles.setdefault(profile_index, name)
             profile_index += 1
             idx += NAME_SIZE + NAME_OFFSET
+
+        # If *any* decoded name looks corrupt, discard the whole batch
+        # so the hardcoded defaults in AVAILABLE_PROFILES stay in use.
+        for pid, name in profiles.items():
+            if not self._is_valid_profile_name(name):
+                _LOGGER.debug(
+                    "Discarding corrupt profile %d: %r", pid, name
+                )
+                return {}
+
         return profiles
 
     async def power_on(self) -> None:
