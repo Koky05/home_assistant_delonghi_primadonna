@@ -48,6 +48,11 @@ _LOGGER = logging.getLogger(__name__)
 
 START_BYTE = 0xD0
 
+# The fixed header of a statistics ("0xA2") response frame. The length byte
+# (0x41 = 66) is the same for the ranges this integration requests; when the
+# machine repeats whole records the header reappears inside the body.
+STATISTICS_RESPONSE_HEADER = b"\xd0\x41\xa2\x0f"
+
 
 @dataclass
 class MonitorData:
@@ -1060,12 +1065,32 @@ class DelongiPrimadonna:
             return False
 
     async def _parse_statistics(self, data: bytes) -> None:
-        """Parse statistics response"""
+        """Parse a statistics response.
+
+        The machine occasionally transmits the whole statistics record block
+        more than once within a single notification. The fixed
+        [ID 2B] + [Value 4B] stride then reads phantom records (e.g. PID
+        53313, which is the frame's own 0xD041 magic read as a number) out of
+        the duplicated block.
+
+        A statistics record header that reappears inside the body marks the
+        start of such a duplicated block, so we keep only the leading fragment
+        and stop. ``d0 41 a2 0f`` can never be a legitimate record (PID 53313
+        is not a real statistic), so this cannot drop genuine data.
+        """
         if len(data) < 12:
             return
 
         hex_data = hexlify(data, " ").decode('utf-8')
         _LOGGER.debug("Statistics Parser. Raw: %s", hex_data)
+
+        repeated = data.find(STATISTICS_RESPONSE_HEADER, 10)
+        if repeated != -1:
+            data = data[:repeated]
+            _LOGGER.debug(
+                "Statistics response truncated at repeated header (offset %d)",
+                repeated,
+            )
 
         # The first parameter ID is implicit from bytes 4-5
         pid = (data[4] << 8) | data[5]
