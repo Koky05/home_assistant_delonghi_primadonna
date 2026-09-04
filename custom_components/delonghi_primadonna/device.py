@@ -48,10 +48,12 @@ _LOGGER = logging.getLogger(__name__)
 
 START_BYTE = 0xD0
 
-# The fixed header of a statistics ("0xA2") response frame. The length byte
-# (0x41 = 66) is the same for the ranges this integration requests; when the
-# machine repeats whole records the header reappears inside the body.
-STATISTICS_RESPONSE_HEADER = b"\xd0\x41\xa2\x0f"
+# The fixed marker of a statistics ("0xA2") response frame header is
+# ``d0 <len> a2 0f``. The length byte varies with the number of records
+# (0x41 = 66 for a ten-record range, 0x1d = 30 for a four-record range), so
+# it is matched against the current frame's own length byte rather than
+# hardcoding one value.
+STATISTICS_RESPONSE_A2 = b"\xa2\x0f"
 
 
 @dataclass
@@ -1073,10 +1075,16 @@ class DelongiPrimadonna:
         53313, which is the frame's own 0xD041 magic read as a number) out of
         the duplicated block.
 
-        A statistics record header that reappears inside the body marks the
-        start of such a duplicated block, so we keep only the leading fragment
-        and stop. ``d0 41 a2 0f`` can never be a legitimate record (PID 53313
-        is not a real statistic), so this cannot drop genuine data.
+        A statistics frame header (``d0 <len> a2 0f``) that reappears inside
+        the body marks the start of such a duplicated block, so we keep only
+        the leading fragment and stop. The first byte of a statistics record
+        (its 2-byte PID) is 0x50 or higher and its value bytes are arbitrary,
+        so a genuine record can never spell the full 4-byte header; the whole
+        frame, however, is parsed with the fixed stride and can in principle
+        contain the sequence by coincidence. This guard is a protocol-specific
+        heuristic, not a general record validator: it only fires for statistics
+        responses and only when the length byte matches the current frame's own
+        length byte, so it never affects clean single-frame responses.
         """
         if len(data) < 12:
             return
@@ -1084,7 +1092,8 @@ class DelongiPrimadonna:
         hex_data = hexlify(data, " ").decode('utf-8')
         _LOGGER.debug("Statistics Parser. Raw: %s", hex_data)
 
-        repeated = data.find(STATISTICS_RESPONSE_HEADER, 10)
+        header = bytes((START_BYTE, data[1], *STATISTICS_RESPONSE_A2))
+        repeated = data.find(header, 10)
         if repeated != -1:
             data = data[:repeated]
             _LOGGER.debug(

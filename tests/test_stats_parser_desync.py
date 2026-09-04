@@ -26,9 +26,11 @@ sys.path.append(
 )
 
 from delonghi_primadonna.device import DelongiPrimadonna  # noqa: E402
-from delonghi_primadonna.device import (  # noqa: E402
-    STATISTICS_RESPONSE_HEADER,
-)
+
+
+def _header_of(data):
+    """The statistics frame header for *data*, matching its length byte."""
+    return bytes((0xD0, data[1], 0xA2, 0x0F))
 
 CONFIG = {
     "mac": "00:11:22:33:44:55",
@@ -96,7 +98,7 @@ async def test_duplicated_frames_keep_only_leading_block():
 
         # Each of these frames repeats the header inside the body, so the
         # parser must have truncated and kept only the first copy.
-        assert data.count(STATISTICS_RESPONSE_HEADER) > 1, name
+        assert data.count(_header_of(data)) > 1, name
         raw = await _raw_pids(device)
         assert raw == expected, f"{name}: got {sorted(raw)}, expected {sorted(expected)}"
 
@@ -109,7 +111,7 @@ async def test_clean_frames_unchanged():
 
         # No repeated header, so the guard never truncates: leading records
         # must parse to their documented values.
-        assert data.count(STATISTICS_RESPONSE_HEADER) <= 1, name
+        assert data.count(_header_of(data)) <= 1, name
         for pid, value in expected.items():
             assert device.statistics[pid] == value, (
                 f"{name}: ID {pid} = {device.statistics.get(pid)}, "
