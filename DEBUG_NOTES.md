@@ -81,7 +81,7 @@ The request id is the third byte of the command, the response id must be the sam
 | 0x95     |                                                     |
 | 0xa2     | Statistics request/response                         |
 | 0xa3     |                                                     |
-| 0xa4     | Request profile list (answered only while awake)    |
+| 0xa4     | Request profile list (see "Profile list" below)     |
 | 0xa5     |                                                     |
 | 0xa9     | Switch the user profile                             |
 | 0xaa     |                                                     |
@@ -175,9 +175,12 @@ This command is used to request various counters (beverages, maintenance, etc.) 
 
 ### Profile list (0xa4)
 
-Captured 2026-08-20 on a machine with six profiles.
+Captured 2026-08-20 on a machine with six profiles. The exact model was not
+recorded, so treat the behavioural notes below as one machine's behaviour
+rather than a protocol guarantee; the frame layout itself is confirmed by the
+CRCs and by `_parse_profile_response`.
 
-**Only answered while the machine is awake.** In standby it stays silent -
+**Observed to be answered only while the machine is awake.** In standby it stayed silent -
 not even a status frame comes back - so the request times out. Statistics
 (`0xa2`) and settings (`0x95`) *are* answered in standby, which is what
 makes the difference easy to miss.
