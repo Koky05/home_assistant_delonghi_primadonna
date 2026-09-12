@@ -81,7 +81,7 @@ The request id is the third byte of the command, the response id must be the sam
 | 0x95     |                                                     |
 | 0xa2     | Statistics request/response                         |
 | 0xa3     |                                                     |
-| 0xa4     | Request profile list                                |
+| 0xa4     | Request profile list (answered only while awake)    |
 | 0xa5     |                                                     |
 | 0xa9     | Switch the user profile                             |
 | 0xaa     |                                                     |
@@ -172,3 +172,59 @@ This command is used to request various counters (beverages, maintenance, etc.) 
 > [!NOTE]
 > **The Milk Cleaning ID Discrepancy**
 > Analysis of the decompiled APK (`b7.e.java` line 508) shows that the official app requests **ID 115** for the milk cleaning counter. However, some integration users have reported that their machines provide this value on **ID 111**. The current implementation uses 111, but 115 is worth investigating if 111 returns 0.
+
+### Profile list (0xa4)
+
+Captured 2026-08-20 on a machine with six profiles.
+
+**Only answered while the machine is awake.** In standby it stays silent -
+not even a status frame comes back - so the request times out. Statistics
+(`0xa2`) and settings (`0x95`) *are* answered in standby, which is what
+makes the difference easy to miss.
+
+Request, reading a range of profiles (`<start> <end>`, inclusive):
+
+```
+0d 07 a4 f0 01 03 d8 2e     profiles 1-3
+0d 07 a4 f0 04 06 77 7e     profiles 4-6
+```
+
+Response, ~250 ms later:
+
+```
+d0 44 a4 f0 00 41 00 6e 00 64 00 72 00 65 00 61 00 00 00 00 00 00 00 00 08
+            00 4d 00 61 00 72 00 74 00 69 00 6e 00 00 00 00 00 00 00 00 05
+            00 42 00 45 00 33 00 2f 00 42 00 45 00 4e 00 55 00 54 00 5a 03  ed ed
+```
+
+Layout: 4 byte header, then one 21-byte record per profile, then 2 byte CRC.
+The length byte (`0x44` = 68) is the total frame length minus one.
+
+Each record is 10 characters UTF-16 big-endian, padded with NUL, followed by
+one byte:
+
+| Record | Name | Last byte |
+|---|---|---|
+| 1 | `Andrea` | `0x08` |
+| 2 | `Martin` | `0x05` |
+| 3 | `BE3/BENUTZ` | `0x03` |
+| 4-6 | `BE4/BENUTZ` … | `0x03` |
+
+The last byte is the **icon** shown for that profile. The two personalised
+profiles carry different values while all four factory profiles share one,
+which rules out a simple "configured" flag. Independently confirmed by
+[longshot](https://github.com/mmastrac/longshot), which decodes the same
+structure as `WideStringWithIcon { name: String, icon: u8 }` and uses it for
+both `ProfileNameRead` and `RecipeNameRead`. The icon values themselves are
+not enumerated there.
+
+Names are truncated to the 10 character field: the factory name is
+`BE3/BENUTZER`, the machine reports `BE3/BENUTZ`.
+
+The response carries no index, so the reader has to remember which range it
+asked for.
+
+The two personalised profile names in the example above were replaced with
+placeholders of the same length and the frame's CRC recomputed, so the layout,
+the padding and the icon bytes are exactly as captured while the names are not.
+The factory names are unchanged.
